@@ -16,7 +16,7 @@ Drop an `.xpj` project file exported from an Akai MPC Sample onto the window. MP
 |---|---|
 | Drum tracks | Drum Rack (one per track) |
 | Pads + samples | Drum Rack slots with Simpler |
-| Sequences | MIDI clips in Arrangement View |
+| Sequences | MIDI clips in the Session View |
 | Sample references | Linked to your original files |
 | Master bus compressor | Compressor2 on the main track |
 
