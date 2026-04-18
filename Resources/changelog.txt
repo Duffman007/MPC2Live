@@ -1,0 +1,12 @@
+MPC2Live Changelog
+==================
+
+Beta 0.10 — Initial release
+• Drag-and-drop .xpj project conversion to Ableton Live Set
+• Drum tracks mapped to Ableton Drum Rack with individual pads
+• Sequences converted to MIDI clips
+• Sample references preserved and linked
+• Master bus compressor detected and applied to ALS main track
+• Dark / light theme toggle
+• Update checker
+• Feedback form

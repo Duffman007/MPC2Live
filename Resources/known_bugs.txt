@@ -1,0 +1,10 @@
+MPC2Live — Known Issues
+=======================
+
+Beta 0.10
+---------
+• Pad / Knob effects are not transferred to Ableton
+• Plugin effects other than the master bus compressor are not converted.
+
+
+Please use the Feedback button to report additional bugs.

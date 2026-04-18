@@ -1,0 +1,28 @@
+MPC2Live Help
+=============
+
+GETTING STARTED
+---------------
+1. On your MPC, save your project. The .xpj file will be in the project folder on your SD card or internal storage.
+2. Copy the project folder to your Mac (via USB, Wi-Fi, or SD card reader).
+3. Drag the .xpj file onto the MPC2Live window — or click "Browse" to locate it.
+4. The converted .als file will appear in the same folder as your .xpj.
+5. Open the .als in Ableton Live.
+
+WHAT GETS CONVERTED
+-------------------
+• Drum tracks → Ableton Drum Rack (one rack per track)
+• Pads → Drum Rack slots with Simpler instruments
+• Sequences → MIDI clips in the arrangement view
+• Sample references → linked to your original files
+• Master bus compressor → Ableton Compressor2 on the main track
+
+TIPS
+----
+• Make sure your sample files are accessible on your Mac at the same relative path.
+• If samples show as missing in Ableton, use "Collect All and Save" to locate them.
+• For best results, use Ableton Live 11 or later.
+
+SUPPORT
+-------
+Use the Feedback button in the app to report bugs or request features.
