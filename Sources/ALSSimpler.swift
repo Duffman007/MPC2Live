@@ -97,20 +97,24 @@ enum ALSSimpler {
 
     /// Build a Simpler DeviceChain XML string for the given pad.
     /// Returns the inner DeviceChain block to replace <Devices /> in the MidiTrack.
+    /// `canonicalFile` is the deduplicated filename that was actually copied to Samples/Imported/
+    /// (may differ from pad.sampleFile which can have a 3-digit suffix e.g. "Kick001.wav").
     static func build(
         pad: MPCPad,
-        samplesURL: URL
+        samplesURL: URL,
+        canonicalFile: String? = nil
     ) -> String {
         guard let compressed = Data(base64Encoded: templateB64,
                                     options: .ignoreUnknownCharacters),
               let xml = try? ALSWriter.gunzip(compressed)
         else { return "<!-- ALSSimpler: template decode failed -->" }
-        return patch(xml, pad: pad, samplesURL: samplesURL)
+        return patch(xml, pad: pad, samplesURL: samplesURL, canonicalFile: canonicalFile)
     }
 
     // MARK: - Private
 
-    private static func patch(_ xml: String, pad: MPCPad, samplesURL: URL) -> String {
+    private static func patch(_ xml: String, pad: MPCPad, samplesURL: URL,
+                              canonicalFile: String? = nil) -> String {
         // The template ends with two </DeviceChain> tags — strip the extra trailing one
         // (it was captured as part of the outer MidiTrack DeviceChain in the reference)
         var tpl = xml
@@ -118,8 +122,11 @@ enum ALSSimpler {
             tpl = String(tpl[..<lastRange.lowerBound])
         }
 
-        let relPath    = "Samples/Imported/\(pad.sampleFile)"
-        let wavURL     = samplesURL.appendingPathComponent(pad.sampleFile)
+        // Use canonical filename for the path — the dedup logic may have mapped
+        // e.g. "Kick001.wav" → "Kick.wav" and only copied the canonical to Samples/Imported/.
+        let effectiveFile = canonicalFile ?? pad.sampleFile
+        let relPath    = "Samples/Imported/\(effectiveFile)"
+        let wavURL     = samplesURL.appendingPathComponent(effectiveFile)
         let info       = WAVInfo.read(from: wavURL)
         let sampleEnd  = info?.frameCount ?? 0
         let fileSize   = info?.fileSize ?? 0
@@ -140,6 +147,23 @@ enum ALSSimpler {
         tpl = replaceFirst(tpl,
             pattern: #"<RelativePath Value="[^"]*\.(?:wav|WAV|aif|aiff|mp3)[^"]*""#,
             with: "<RelativePath Value=\"\(xmlEscape(relPath))\"")
+
+        // Clear stale absolute Path for the sample — Ableton resolves via RelativePath.
+        // The template was built from a Koala2Live reference and contains a hardcoded
+        // absolute path (e.g. OTHER.wav) that must be blanked out.
+        tpl = replaceFirst(tpl,
+            pattern: #"<Path Value="[^"]*\.(?:wav|WAV|aif|aiff|mp3)[^"]*""#,
+            with: "<Path Value=\"\"")
+
+        // Clear stale .adv preset FileRef paths (Koala2Live template artefacts).
+        tpl = tpl.replacingOccurrences(
+            of: #"<RelativePath Value="[^"]*\.adv[^"]*" />"#,
+            with: "<RelativePath Value=\"\" />",
+            options: .regularExpression)
+        tpl = tpl.replacingOccurrences(
+            of: #"<Path Value="[^"]*\.adv[^"]*" />"#,
+            with: "<Path Value=\"\" />",
+            options: .regularExpression)
 
         // SampleEnd
         tpl = replaceFirst(tpl,
@@ -189,26 +213,30 @@ enum ALSSimpler {
         pad: MPCPad,
         samplesURL: URL,
         sliceStarts: [Int] = [],
-        sampleRate: Int = 44100
+        sampleRate: Int = 44100,
+        canonicalFile: String? = nil
     ) -> String {
         guard let compressed = Data(base64Encoded: templateB64,
                                     options: .ignoreUnknownCharacters),
               let xml = try? ALSWriter.gunzip(compressed)
         else { return "<!-- ALSSimpler: template decode failed -->" }
         return patchSlice(xml, pad: pad, samplesURL: samplesURL,
-                          sliceStarts: sliceStarts, sampleRate: sampleRate)
+                          sliceStarts: sliceStarts, sampleRate: sampleRate,
+                          canonicalFile: canonicalFile)
     }
 
     private static func patchSlice(_ xml: String, pad: MPCPad, samplesURL: URL,
-                                    sliceStarts: [Int], sampleRate: Int) -> String {
+                                    sliceStarts: [Int], sampleRate: Int,
+                                    canonicalFile: String? = nil) -> String {
         var tpl = xml
         // Strip extra trailing </DeviceChain>
         if let lastRange = tpl.range(of: "</DeviceChain>", options: .backwards) {
             tpl = String(tpl[..<lastRange.lowerBound])
         }
 
-        let relPath     = "Samples/Imported/\(pad.sampleFile)"
-        let wavURL      = samplesURL.appendingPathComponent(pad.sampleFile)
+        let effectiveFile = canonicalFile ?? pad.sampleFile
+        let relPath     = "Samples/Imported/\(effectiveFile)"
+        let wavURL      = samplesURL.appendingPathComponent(effectiveFile)
         let info        = WAVInfo.read(from: wavURL)
         let sampleEnd   = info?.frameCount ?? 0
         let fileSize    = info?.fileSize ?? 0
@@ -225,6 +253,20 @@ enum ALSSimpler {
         tpl = replaceFirst(tpl,
             pattern: #"<RelativePath Value="[^"]*\.(?:wav|WAV|aif|aiff|mp3)[^"]*""#,
             with: "<RelativePath Value=\"\(xmlEscape(relPath))\"")
+
+        // Clear stale absolute Path and .adv preset refs (Koala2Live template artefacts)
+        tpl = replaceFirst(tpl,
+            pattern: #"<Path Value="[^"]*\.(?:wav|WAV|aif|aiff|mp3)[^"]*""#,
+            with: "<Path Value=\"\"")
+        tpl = tpl.replacingOccurrences(
+            of: #"<RelativePath Value="[^"]*\.adv[^"]*" />"#,
+            with: "<RelativePath Value=\"\" />",
+            options: .regularExpression)
+        tpl = tpl.replacingOccurrences(
+            of: #"<Path Value="[^"]*\.adv[^"]*" />"#,
+            with: "<Path Value=\"\" />",
+            options: .regularExpression)
+
         tpl = replaceFirst(tpl,
             pattern: #"<SampleEnd Value="[^"]*""#,
             with: "<SampleEnd Value=\"\(sampleEnd)\"")

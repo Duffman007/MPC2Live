@@ -6,14 +6,28 @@ import Foundation
 
 // MARK: - Top-level project
 
+// MARK: - Compressor state
+
+/// Decoded state of the MPC Color Compressor plugin on the master output.
+/// Attack, Release and Amount raw values cannot be decoded from the proprietary
+/// blob format, so Ableton Compressor2 defaults are used for those parameters.
+/// What CAN be detected is whether the compressor is bypassed and whether the
+/// Color (tonal saturation) button is engaged.
+struct MPCCompressorState {
+    let enabled:  Bool   // slot is enabled in MPC mixer
+    let bypassed: Bool   // Bypass button pressed on MPC
+    let colorOn:  Bool   // Color button engaged (informational only — no Ableton equivalent)
+}
+
 struct MPCProject {
     let name: String            // derived from filename
     let bpm: Double
+    let masterTempoEnabled: Bool     // true = single global BPM; false = per-sequence BPM
     let timeSignature: MPCTimeSig
     let lengthBars: Int
     let drumTrack: MPCDrumTrack?      // first drum program (nil if none)
     let sequences: [MPCSequence]      // all sequences (one clip slot each)
-    let hasMasterCompressor: Bool     // true = Color Compressor on master output bus
+    let masterCompressor: MPCCompressorState?  // nil = no Color Compressor on master bus
     // Convenience for single-sequence access
     var sequence: MPCSequence { sequences.first ?? MPCSequence(name: "Sequence 01", trackName: "", events: [], lengthPulses: 7680, bpm: bpm) }
 }
@@ -81,6 +95,7 @@ struct MPCPad {
     let filterResonance: Double      // 0.0-1.0 normalized (maps to ALS Res 0-1.25)
     let muted: Bool                  // mixable.mute — instrument-level mute (not per-sequence)
     let automationEvents: [MPCAutomationEvent]   // type=2 events from sequence, matched by note number
+    let isFilterMode: Bool           // true = 16 Levels Filter (separate drum rack track per cutoff)
 }
 
 // MARK: - Sequence / MIDI events
@@ -100,6 +115,7 @@ struct MPCNoteEvent {
     let lengthPulses: Int
     let tuningModifier: Double?      // modifierValue0 if modifierActiveState0==true, else nil
     let chopSlice: Int?              // round(modifierValue15*127) if modifierActiveState15==true
+    let filterModifier: Double?      // modifierValue2 if modifierActiveState2==true (16 Levels Filter)
 }
 
 // MARK: - Bank grouping

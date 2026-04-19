@@ -136,7 +136,7 @@ private class FeedbackHelper: NSObject {
 
     private func sendEmailViaEmailJS(from email: String, subject: String, message: String) {
         let serviceID  = "service_z5c4357"
-        let templateID = "template_iuezwgx"
+        let templateID = "template_58hoasl"
         let publicKey  = "hrwLg7mIRzW6PGSVK"
         let privateKey = "adw6c7lrwdqZAdV8SEapd"
 

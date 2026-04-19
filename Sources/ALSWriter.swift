@@ -95,8 +95,10 @@ struct ALSWriter {
 
     /// Update NextPointeeId to be safely above all IDs we assign.
     /// Ableton rejects the file if any Id >= NextPointeeId.
-    /// We use 200_000 — well above the ~31_000 max we assign for 8 banks × 16 pads.
-    static func setNextPointeeId(_ xml: String, value: Int = 500_000) -> String {
+    /// Drum rack IDs reach up to ~30_000 + banks*10_000 + pads*96.
+    /// Remapped track IDs use 200_000 + trackIndex*2_000 (up to ~240_000 for 20 tracks).
+    /// Master compressor uses 490_000+. We set 600_000 as a safe ceiling.
+    static func setNextPointeeId(_ xml: String, value: Int = 600_000) -> String {
         xml.replacingOccurrences(
             of: #"<NextPointeeId Value="\d+" />"#,
             with: "<NextPointeeId Value=\"\(value)\" />",
@@ -104,13 +106,27 @@ struct ALSWriter {
         )
     }
 
-    /// Inject an Ableton Compressor2 (default settings) into the MainTrack Devices block.
-    /// Called when the MPC project has an enabled Color Compressor on the master output.
+    /// Inject an Ableton Compressor2 into the MainTrack Devices block, configured
+    /// to mirror the MPC Color Compressor's parameter ranges.
+    ///
+    /// MPC Color Compressor specs (from hardware manual):
+    ///   Attack:  0.1 – 150 ms   Release: 3 – 300 ms   Amount: 0 – 100 %
+    ///
+    /// The MPC's plugin state blob uses an undocumented encoding, so exact current
+    /// values for Attack/Release/Amount cannot be extracted.  What IS decoded
+    /// (blob is 119 bytes after stripping "119." prefix, dots substituted for A):
+    ///   • state.bypassed (bytes[102..104]==[0x03,0xD0,0x80]) → Compressor2 On = false
+    ///   • state.colorOn  (bytes[98..99]==[0x1F,0xF8])        → no Ableton equivalent
+    ///
+    /// The MidiControllerRange for Attack and Release is constrained to MPC limits so
+    /// that MIDI automation sweeps stay within the hardware's physical range.
     ///
     /// The blank template's MainTrack inner DeviceChain looks like:
     ///   <Devices />\n\t\t\t\t\t<SignalModulations />\n\t\t\t\t</DeviceChain>\n\t\t\t</DeviceChain>\n\t\t</MainTrack>
     /// We replace <Devices /> with a fully populated <Devices>…</Devices> block.
-    static func injectMasterCompressor(_ xml: String, idBase: Int = 490_000) -> String {
+    static func injectMasterCompressor(_ xml: String,
+                                       state: MPCCompressorState = MPCCompressorState(enabled: true, bypassed: false, colorOn: false),
+                                       idBase: Int = 490_000) -> String {
         let t5  = String(repeating: "\t", count: 5)
         let t6  = String(repeating: "\t", count: 6)
         let t7  = String(repeating: "\t", count: 7)
@@ -172,7 +188,7 @@ struct ALSWriter {
         comp += "\(t7)<BreakoutIsExpanded Value=\"false\" />\n"
         comp += "\(t7)<On>\n"
         comp += "\(t8)<LomId Value=\"0\" />\n"
-        comp += "\(t8)<Manual Value=\"true\" />\n"
+        comp += "\(t8)<Manual Value=\"\(state.bypassed ? "false" : "true")\" />\n"
         comp += "\(t8)<AutomationTarget Id=\"\(onId)\">\n"
         comp += "\(t9)<LockEnvelope Value=\"0\" />\n"
         comp += "\(t8)</AutomationTarget>\n"
@@ -241,12 +257,16 @@ struct ALSWriter {
         comp += param("Threshold",         "1",               "0.0003162277571", "1.99526238")
         comp += param("Ratio",             "4",               "1",               "340282326356119256160033759537265639424")
         comp += param("ExpansionRatio",    "1.14999998",      "1",               "2")
-        comp += param("Attack",            "1",               "0.009999999776",  "1000")
-        comp += param("Release",           "30",              "1",               "3000")
+        // MPC Color Compressor factory defaults: Attack 80 ms, Release 180 ms, Amount 40%.
+        // Exact per-project values cannot be decoded from the proprietary blob.
+        // MidiControllerRange is constrained to the hardware's physical range.
+        // Amount (0–100 %) maps to Compressor2 DryWet (0–1): 40 % → 0.4.
+        comp += param("Attack",            "80",              "0.1",             "150")
+        comp += param("Release",           "180",             "3",               "300")
         comp += boolParam("AutoReleaseControlOnOff", "false")
         comp += param("Gain",              "0",               "-36",             "36")
         comp += boolParam("GainCompensation", "false")
-        comp += param("DryWet",            "1",               "0",               "1")
+        comp += param("DryWet",            "0.4",             "0",               "1")
         comp += param("Model",             "1",               "0",               "2",    hasMod: false)
         comp += param("LegacyModel",       "1",               "0",               "2",    hasMod: false)
         comp += boolParam("LogEnvelope", "true")
@@ -345,21 +365,68 @@ struct ALSWriter {
     // MARK: - Project folder writer
 
 
-    /// Set per-scene BPM values. scenes is [(bpm, enabled)] indexed 0-based.
-    /// Only sets IsTempoEnabled=true when the scene BPM differs from the master.
+    /// Expand the <Scenes> block so there are at least `count` Scene entries.
+    /// The blank template has 8 Scenes (Ids 0–7); this adds blank Scenes for Ids 8+.
+    /// No-op if `count` ≤ 8. Must be called before setSceneBPMs so the new scenes
+    /// are present when BPM/name injection iterates over them.
+    static func expandScenes(_ xml: String, to count: Int) -> String {
+        guard count > 8 else { return xml }
+        // Find the closing </Scenes> tag — insert extra Scenes before it
+        guard let closeRange = xml.range(of: "</Scenes>") else { return xml }
+
+        let t3 = String(repeating: "\t", count: 3)
+        let t4 = String(repeating: "\t", count: 4)
+        let t5 = String(repeating: "\t", count: 5)
+        var extra = ""
+        for i in 8..<count {
+            extra += "\n\(t3)<Scene Id=\"\(i)\">"
+            extra += "\n\(t4)<FollowAction>"
+            extra += "\n\(t5)<FollowTime Value=\"4\" />"
+            extra += "\n\(t5)<IsLinked Value=\"true\" />"
+            extra += "\n\(t5)<LoopIterations Value=\"1\" />"
+            extra += "\n\(t5)<FollowActionA Value=\"4\" />"
+            extra += "\n\(t5)<FollowActionB Value=\"0\" />"
+            extra += "\n\(t5)<FollowChanceA Value=\"100\" />"
+            extra += "\n\(t5)<FollowChanceB Value=\"0\" />"
+            extra += "\n\(t5)<JumpIndexA Value=\"0\" />"
+            extra += "\n\(t5)<JumpIndexB Value=\"0\" />"
+            extra += "\n\(t5)<FollowActionEnabled Value=\"false\" />"
+            extra += "\n\(t4)</FollowAction>"
+            extra += "\n\(t4)<Name Value=\"\" />"
+            extra += "\n\(t4)<Annotation Value=\"\" />"
+            extra += "\n\(t4)<Color Value=\"-1\" />"
+            extra += "\n\(t4)<Tempo Value=\"128\" />"
+            extra += "\n\(t4)<IsTempoEnabled Value=\"false\" />"
+            extra += "\n\(t4)<TimeSignatureId Value=\"201\" />"
+            extra += "\n\(t4)<IsTimeSignatureEnabled Value=\"false\" />"
+            extra += "\n\(t4)<LomId Value=\"0\" />"
+            extra += "\n\(t4)<ClipSlotsListWrapper LomId=\"0\" />"
+            extra += "\n\(t3)</Scene>"
+        }
+        return xml[..<closeRange.lowerBound] + extra + "\n" + xml[closeRange.lowerBound...]
+    }
+
+    /// Set per-scene BPM values for projects that use per-sequence tempo.
+    /// Only called when `masterTempoEnabled` is false; global-BPM projects skip this
+    /// entirely and rely on the ALS master tempo set by `setBPM`.
+    ///
+    /// - Project scenes (0 ..< sequences.count): set to the sequence BPM;
+    ///   IsTempoEnabled=true only when the BPM differs from the master.
+    /// - Empty trailing scenes (sequences.count ..< totalScenes): IsTempoEnabled=false
+    ///   so they don't show blue arrows or alter tempo when clicked.
     static func setSceneBPMs(_ xml: String, sequences: [(name: String, bpm: Double)],
-                              masterBPM: Double) -> String {
+                              masterBPM: Double, totalScenes: Int) -> String {
         var result = xml
-        for (i, seq) in sequences.enumerated() {
-            let enabled = abs(seq.bpm - masterBPM) > 0.01
-            let sceneTag = "<Scene Id=\"\(i)\">"
+
+        func applyToScene(_ idx: Int, tempo: Double, enabled: Bool) {
+            let sceneTag = "<Scene Id=\"\(idx)\">"
             guard let startRange = result.range(of: sceneTag),
                   let endRange   = result.range(of: "</Scene>",
-                      range: startRange.lowerBound..<result.endIndex) else { continue }
+                      range: startRange.lowerBound..<result.endIndex) else { return }
             var scene = String(result[startRange.lowerBound..<endRange.upperBound])
             scene = scene.replacingOccurrences(
                 of: "<Tempo Value=\"[0-9.]+\" />",
-                with: "<Tempo Value=\"\(seq.bpm)\" />",
+                with: "<Tempo Value=\"\(tempo)\" />",
                 options: .regularExpression)
             scene = scene.replacingOccurrences(
                 of: "<IsTempoEnabled Value=\"[^\"]+\" />",
@@ -368,6 +435,19 @@ struct ALSWriter {
             result = result.replacingCharacters(
                 in: startRange.lowerBound..<endRange.upperBound, with: scene)
         }
+
+        // Project scenes: enable tempo only when different from the MPC default (128).
+        for (i, seq) in sequences.enumerated() {
+            let enabled = abs(seq.bpm - masterBPM) > 0.01
+            applyToScene(i, tempo: seq.bpm, enabled: enabled)
+        }
+
+        // Empty trailing scenes — leave IsTempoEnabled=false so they don't trigger
+        // blue arrows in Ableton's session view. They inherit whatever tempo is current.
+        for i in sequences.count..<totalScenes {
+            applyToScene(i, tempo: 128, enabled: false)
+        }
+
         return result
     }
 

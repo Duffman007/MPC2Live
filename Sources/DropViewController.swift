@@ -420,17 +420,23 @@ class DropViewController: NSViewController {
         var logged = Set<Int>()
         progressTimer = Timer.scheduledTimer(withTimeInterval: 0.055, repeats: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
-            self.fakeProgress = min(self.fakeProgress + 1.6, 100)
+            
+            // Stop at 95% and wait for actual conversion to complete
+            if self.fakeProgress < 95 {
+                self.fakeProgress = min(self.fakeProgress + 1.6, 95)
+            }
+            
             self.dropView.setProgress(self.fakeProgress)
             for (i, step) in Self.logSteps.enumerated() {
                 if self.fakeProgress >= step.0 && !logged.contains(i) {
                     logged.insert(i); self.dropView.appendLogLine(step.1)
                 }
             }
-            if self.fakeProgress >= 100 {
-                t.invalidate(); self.progressTimer = nil; self.applyResultIfReady()
-            } else if self.convDone {
-                self.fakeProgress = 100; self.dropView.setProgress(100)
+            
+            // When conversion is done, jump to 100%
+            if self.convDone {
+                self.fakeProgress = 100
+                self.dropView.setProgress(100)
                 t.invalidate(); self.progressTimer = nil
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.applyResultIfReady() }
             }
@@ -439,7 +445,7 @@ class DropViewController: NSViewController {
 
     private func handleResult(_ r: Converter.Result) {
         convResult = r; convDone = true
-        if progressTimer == nil { applyResultIfReady() }
+        // Timer will detect convDone and jump to 100%
     }
 
     private func applyResultIfReady() {

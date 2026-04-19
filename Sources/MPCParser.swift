@@ -72,16 +72,17 @@ struct MPCParser {
                                               masterTempoEnabled: masterTempoEnabled)
         let drumTrack = parseDrumTrack(from: data)
         let ts        = parseTimeSig(from: data)
-        let hasMasterCompressor = parseMasterCompressor(from: data)
+        let masterCompressor = parseMasterCompressor(from: data)
 
         return MPCProject(
             name: name,
             bpm: bpm,
+            masterTempoEnabled: masterTempoEnabled,
             timeSignature: ts,
             lengthBars: extractLengthBars(from: data),
             drumTrack: drumTrack,
             sequences: sequences,
-            hasMasterCompressor: hasMasterCompressor
+            masterCompressor: masterCompressor
         )
     }
 
@@ -186,9 +187,19 @@ struct MPCParser {
             } else {
                 chopSlice = nil
             }
+            // Read filter cutoff modifier (slot 2) — set in 16 Levels Filter mode
+            // The value is already an absolute normalised cutoff (0-1); use directly.
+            let filterMod: Double?
+            if let active = noteData["modifierActiveState2"] as? Bool, active,
+               let val    = noteData["modifierValue2"]       as? Double {
+                filterMod = val
+            } else {
+                filterMod = nil
+            }
             result.append(MPCNoteEvent(timePulses: time, midiNote: note,
                                        velocity: velocity, lengthPulses: length,
-                                       tuningModifier: tuning, chopSlice: chopSlice))
+                                       tuningModifier: tuning, chopSlice: chopSlice,
+                                       filterModifier: filterMod))
         }
         return result.sorted { $0.timePulses < $1.timePulses }
     }
@@ -211,9 +222,11 @@ struct MPCParser {
             let noteForPad = (program["padNoteMap"] as? [String: Any])?["noteForPad"]
                 as? [String: Int] ?? [:]
 
-            // Build set of MIDI notes that are note-mode (modifier0) or chop-mode (modifier15)
-            var noteModeNotes = Set<Int>()
-            var chopModeNotes = Set<Int>()
+            // Build set of MIDI notes that are note-mode (modifier0), chop-mode (modifier15),
+            // or filter-mode (modifier2 = 16 Levels Filter)
+            var noteModeNotes   = Set<Int>()
+            var chopModeNotes   = Set<Int>()
+            var filterModeNotes = Set<Int>()
             if let sequences = data["sequences"] as? [[String: Any]] {
                 for seq in sequences {
                     if let seqVal = seq["value"] as? [String: Any],
@@ -230,6 +243,10 @@ struct MPCParser {
                                             // Slot 0 active = 16 Levels Tune
                                             if let active = n["modifierActiveState0"] as? Bool, active {
                                                 noteModeNotes.insert(pitch)
+                                            }
+                                            // Slot 2 active = 16 Levels Filter
+                                            if let active = n["modifierActiveState2"] as? Bool, active {
+                                                filterModeNotes.insert(pitch)
                                             }
                                             // Slot 15 active = Chop mode
                                             if let active = n["modifierActiveState15"] as? Bool, active {
@@ -359,8 +376,11 @@ struct MPCParser {
                     }
                     return false
                 }()
-                let isNoteMode  = noteModeNotes.contains(midiNote)
-                let isChopMode  = chopModeNotes.contains(midiNote)
+                let isNoteMode   = noteModeNotes.contains(midiNote)
+                let isChopMode   = chopModeNotes.contains(midiNote)
+                // Filter mode: note has 16 Levels Filter events. Note mode takes priority
+                // (if the same note has both, note-mode routing is used instead).
+                let isFilterMode = filterModeNotes.contains(midiNote) && !noteModeNotes.contains(midiNote)
                 let chopRegions = (inst["chopProperties"] as? [String: Any])?["chopRegions"] as? Int ?? 16
                 let chopMode    = (inst["chopProperties"] as? [String: Any])?["chopMode"]    as? Int ?? 0
 
@@ -393,7 +413,8 @@ struct MPCParser {
                     filterType: filterType, filterCutoff: filterCutoff,
                     filterResonance: filterResonance,
                     muted: padMuted,
-                    automationEvents: noteAutoEvents[midiNote] ?? []
+                    automationEvents: noteAutoEvents[midiNote] ?? [],
+                    isFilterMode: isFilterMode
                 ))
             }
 
@@ -407,26 +428,31 @@ struct MPCParser {
     // MARK: - Helpers
 
     private static func extractBPM(from data: [String: Any]) -> Double {
-        // If masterTempoEnabled, use masterTempo (overrides per-sequence tempo)
+        // If masterTempoEnabled, the global masterTempo overrides all sequences.
         if let enabled = data["masterTempoEnabled"] as? Bool, enabled,
            let master = data["masterTempo"] as? Double { return master }
-        // Otherwise use first sequence's tempo
-        if let seqs = data["sequences"] as? [[String: Any]],
-           let val  = seqs.first?["value"] as? [String: Any],
-           let bpm  = val["bpm"] as? Double { return bpm }
-        return data["masterTempo"] as? Double ?? 120.0
+        // When per-sequence BPM is in use, the MPC's factory default is 128 BPM.
+        // Unmodified sequences stay at 128; the user adjusts individual scenes away from that.
+        // Setting the ALS master to 128 means those untouched scenes inherit it naturally
+        // (IsTempoEnabled=false) while explicitly changed scenes get IsTempoEnabled=true.
+        return 128.0
     }
 
     private static func extractLengthBars(from data: [String: Any]) -> Int {
-        if let seqs = data["sequences"] as? [[String: Any]],
-           let val  = seqs.first?["value"] as? [String: Any],
-           let bars = val["lengthBars"] as? Int { return bars }
+        if let seqs = data["sequences"] as? [[String: Any]] {
+            let sorted = seqs.sorted { ($0["key"] as? Int ?? 0) < ($1["key"] as? Int ?? 0) }
+            if let val  = sorted.first?["value"] as? [String: Any],
+               let bars = val["lengthBars"] as? Int { return bars }
+        }
         return 2
     }
 
     private static func parseTimeSig(from data: [String: Any]) -> MPCTimeSig {
-        guard let seqs   = data["sequences"] as? [[String: Any]],
-              let val    = seqs.first?["value"] as? [String: Any],
+        guard let seqs   = data["sequences"] as? [[String: Any]] else {
+            return MPCTimeSig(beatsPerBar: 4, pulsesPerBeat: 960)
+        }
+        let sortedSeqs = seqs.sorted { ($0["key"] as? Int ?? 0) < ($1["key"] as? Int ?? 0) }
+        guard let val    = sortedSeqs.first?["value"] as? [String: Any],
               let tsTrack = val["timeSignatureTrack"] as? [String: Any],
               let tsList  = tsTrack["timeSignatures"] as? [[String: Any]],
               let ts      = tsList.first else {
@@ -448,26 +474,57 @@ struct MPCParser {
 
     // MARK: - Master compressor detection
 
-    /// Returns true if an enabled Color Compressor is present on the master output bus
-    /// (data.mixer.outputs[0].mixable.inserts.effects[]).
-    private static func parseMasterCompressor(from data: [String: Any]) -> Bool {
+    /// Returns an MPCCompressorState if an enabled Color Compressor is present on the
+    /// master output bus (data.mixer.outputs[0].mixable.inserts.effects[]).
+    ///
+    /// The plugin state blob ("119.<base64>") is decoded to extract:
+    ///   • bypassed — bytes[105:108] == [0x03, 0xD0, 0x80]
+    ///   • colorOn  — bytes[101:103] == [0x1F, 0xF8]
+    ///
+    /// Attack/Release/Amount raw values use a proprietary encoding that cannot be
+    /// reverse-engineered from the available test data, so Ableton defaults are used
+    /// and only the parameter *range* is constrained to match MPC specs.
+    private static func parseMasterCompressor(from data: [String: Any]) -> MPCCompressorState? {
         guard let mixer   = data["mixer"]            as? [String: Any],
               let outputs = mixer["outputs"]         as? [[String: Any]],
               let master  = outputs.first,
               let mixable = master["mixable"]        as? [String: Any],
               let inserts = mixable["inserts"]       as? [String: Any],
               let effects = inserts["effects"]       as? [[String: Any]]
-        else { return false }
+        else { return nil }
 
-        return effects.contains { fx in
-            guard let plugin = fx["plugin"]            as? [String: Any],
-                  let desc   = plugin["description"]   as? [String: Any],
-                  let name   = desc["name"]             as? String,
+        guard let fx = effects.first(where: { fx in
+            guard let plugin = fx["plugin"]          as? [String: Any],
+                  let desc   = plugin["description"] as? [String: Any],
+                  let name   = desc["name"]          as? String,
                   name == "Color Compressor"
             else { return false }
-            // Only inject if the slot is enabled (default true)
             let enabled = fx["enable"] as? Bool ?? true
             return enabled
+        }) else { return nil }
+
+        let enabled = fx["enable"] as? Bool ?? true
+
+        // Attempt to decode bypass / color state from the plugin state blob.
+        // Format: "119.<base64>" where '.' substitutes for 'A' (both = 0 in base64).
+        // Strip the "119." prefix first, then base64-decode the remainder.
+        // Decodes to 119 bytes; variable parameter region is bytes 79–104.
+        //   Color ON:   bytes[98..99]   == [0x1F, 0xF8]
+        //   Bypass ON:  bytes[102..104] == [0x03, 0xD0, 0x80]
+        var bypassed = false
+        var colorOn  = false
+
+        if let plugin   = fx["plugin"]  as? [String: Any],
+           let stateStr = plugin["state"] as? String,
+           stateStr.hasPrefix("119.") {
+            let b64    = stateStr.dropFirst(4).replacingOccurrences(of: ".", with: "A")
+            let padded = b64 + String(repeating: "=", count: (4 - b64.count % 4) % 4)
+            if let blob = Data(base64Encoded: padded), blob.count >= 105 {
+                colorOn  = blob[98] == 0x1F && blob[99] == 0xF8
+                bypassed = blob[102] == 0x03 && blob[103] == 0xD0 && blob[104] == 0x80
+            }
         }
+
+        return MPCCompressorState(enabled: enabled, bypassed: bypassed, colorOn: colorOn)
     }
 }

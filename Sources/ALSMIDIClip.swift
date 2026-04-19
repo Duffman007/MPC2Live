@@ -48,6 +48,12 @@ struct ALSMIDIClip {
             // Only include notes belonging to this bank
             guard let evBankIndex = noteToBankIndex[ev.midiNote],
                   evBankIndex == bankIndex else { continue }
+            // Skip 16 Levels Tune events — they route to the pad's own Simpler track.
+            // (modifierActiveState0=true sets tuningModifier; velocity-mode events have nil)
+            if ev.tuningModifier != nil { continue }
+            // Skip 16 Levels Filter events — they route to the pad's own filter-mode track.
+            // (modifierActiveState2=true sets filterModifier)
+            if ev.filterModifier != nil { continue }
 
             // MIDI clip fires the original MPC MIDI note (36=C1, 37=C#1 etc.)
             // ReceivingNote in the drum rack is separate — handled by ALSDrumRack.
@@ -273,14 +279,14 @@ struct ALSMIDIClip {
             let vel      = max(1, min(127, Int(ev.velocity * 127)))
 
             // Convert tuningModifier to MIDI note.
-            // MPC 16 Levels Tune: modifierValue0 encodes pad position as 0-1 across 16 pads.
-            // Pad 01 = t=0, pad 16 = t=1, step size = 1/15. Each step = 1 semitone.
-            // Pad 04 is the original pitch (0 semitones): t = 3/15 → offset = 3 - 3 = 0.
-            // Formula: round(t × 15) - 3  (range: -3 at pad01 → 0 at pad04 → +12 at pad16)
+            // MPC 16 Levels Tune: modifierValue0 is a normalised fine-tune value where
+            // 0.5 = no pitch change. Adjacent pad positions are ~1/240 apart, and each
+            // step of 1/240 corresponds to exactly 1 semitone.
+            // Formula: round((t - 0.5) × 240)  →  semitone offset from rootNote.
             let midiNote: Int
             if let t = ev.tuningModifier {
-                let semitoneOffset = (t * 15.0 - 3.0).rounded()
-                midiNote = pad.rootNote + Int(semitoneOffset)
+                let semitoneOffset = ((t - 0.5) * 240.0).rounded()
+                midiNote = max(0, min(127, pad.rootNote + Int(semitoneOffset)))
             } else {
                 midiNote = pad.rootNote
             }
@@ -352,6 +358,68 @@ struct ALSMIDIClip {
                     + "Probability=\"1\" IsEnabled=\"true\" NoteId=\"\(n.noteId)\" />\n"
             }
             keyTracksXml += tab(13) + "<KeyTrack Id=\"\(idx)\">\n"
+            keyTracksXml += tab(14) + "<Notes>\n"
+            keyTracksXml += notesXml
+            keyTracksXml += tab(14) + "</Notes>\n"
+            keyTracksXml += tab(14) + "<MidiKey Value=\"\(alsNote)\" />\n"
+            keyTracksXml += tab(13) + "</KeyTrack>\n"
+        }
+
+        return buildClipXML(clipName: clipName, lengthBeats: lengthBeats,
+                             keyTracksXml: keyTracksXml, noteId: noteId)
+    }
+
+    // MARK: - Filter mode (16 Levels Filter) clip builder
+
+    /// Build a MIDI clip for a filter-mode pad.
+    /// Each event's filterModifier value maps to a drum rack slot index via the fixed MPC formula:
+    ///   slot = round((value × 127 + 1) / 8) − 1   (0-based, clamped 0–15)
+    /// This avoids floating-point dict-key mismatches by computing the slot analytically.
+    static func buildFilterMode(
+        clipName: String,
+        sequence: MPCSequence,
+        pad: MPCPad,
+        filterValueToIndex: [Double: Int] = [:],   // kept for call-site compatibility; not used
+        ppq: Int,
+        beatsPerBar: Int
+    ) -> String {
+        let lengthBeats = Double(sequence.lengthPulses) / Double(ppq)
+        let minDuration = 0.0625
+
+        // Only events for this pad that carry a filter modifier
+        let padEvents = sequence.events.filter {
+            $0.midiNote == pad.midiNote && $0.filterModifier != nil
+        }
+
+        var keyMap: [Int: [(time: Double, duration: Double, velocity: Int, noteId: Int)]] = [:]
+        var noteId = 1
+
+        for ev in padEvents {
+            guard let fv = ev.filterModifier else { continue }
+            // Compute slot index analytically from the fixed MPC formula (8k−1)/127.
+            // Robust against JSON float representation differences.
+            let idx = max(0, min(15, Int(round((fv * 127.0 + 1.0) / 8.0)) - 1))
+            let beatTime = Double(ev.timePulses)  / Double(ppq)
+            let duration = max(minDuration, Double(ev.lengthPulses) / Double(ppq))
+            let vel      = max(1, min(127, Int(ev.velocity * 127)))
+            // Drum rack trigger note: 36 + padInBank (mirrors standard drum rack clip convention)
+            let alsNote  = 36 + idx
+
+            keyMap[alsNote, default: []].append((beatTime, duration, vel, noteId))
+            noteId += 1
+        }
+
+        var keyTracksXml = ""
+        for (ktIdx, alsNote) in keyMap.keys.sorted().enumerated() {
+            var notesXml = ""
+            for n in keyMap[alsNote]! {
+                notesXml += tab(15) + "<MidiNoteEvent Time=\"\(fmt(n.time))\" "
+                    + "Duration=\"\(fmt(n.duration))\" "
+                    + "Velocity=\"\(n.velocity)\" "
+                    + "VelocityDeviation=\"0\" OffVelocity=\"64\" "
+                    + "Probability=\"1\" IsEnabled=\"true\" NoteId=\"\(n.noteId)\" />\n"
+            }
+            keyTracksXml += tab(13) + "<KeyTrack Id=\"\(ktIdx)\">\n"
             keyTracksXml += tab(14) + "<Notes>\n"
             keyTracksXml += notesXml
             keyTracksXml += tab(14) + "</Notes>\n"
